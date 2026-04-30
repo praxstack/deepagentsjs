@@ -27,6 +27,7 @@ import type {
 import type { StructuredToolInterface } from "@langchain/core/tools";
 
 import { loadSkill, type LoadedSkill } from "./skills.js";
+import { PTCCallBudgetExceededError } from "./errors.js";
 import type { ReplSessionOptions, ReplResult, SkillsContext } from "./types.js";
 import { toCamelCase } from "./utils.js";
 import { transformForEval } from "./transform.js";
@@ -35,6 +36,7 @@ export const DEFAULT_MEMORY_LIMIT = 50 * 1024 * 1024;
 export const DEFAULT_MAX_STACK_SIZE = 320 * 1024;
 export const DEFAULT_EXECUTION_TIMEOUT = 30_000;
 export const DEFAULT_SESSION_ID = "__default__";
+export const DEFAULT_MAX_PTC_CALLS = 256;
 
 // The variant descriptor (WASM binary + glue) is safe to share across sessions;
 // only the instantiated module carries asyncify state. Import once, instantiate per session.
@@ -161,10 +163,16 @@ export class ReplSession {
   private skillsContext: SkillsContext | undefined;
   private skillsLoaded: Map<string, LoadedSkill> = new Map();
   private skillsFailed: Map<string, Error> = new Map();
+  private readonly maxPtcCalls: number | null;
+  private ptcCallsRemaining: number | null = null;
 
   constructor(id: string, options: ReplSessionOptions = {}) {
     this.id = id;
     this.options = options;
+    this.maxPtcCalls =
+      options.maxPtcCalls !== undefined
+        ? options.maxPtcCalls
+        : DEFAULT_MAX_PTC_CALLS;
   }
 
   private async ensureStarted(): Promise<void> {
@@ -318,6 +326,36 @@ export class ReplSession {
   }
 
   /**
+   * Initialise the per-eval PTC counter. Called at the top of every `eval()`.
+   */
+  private resetPtcBudget(): void {
+    this.ptcCallsRemaining =
+      this.maxPtcCalls === null ? null : this.maxPtcCalls;
+  }
+
+  /**
+   * Decrement the PTC call counter and throw if the budget is exhausted.
+   * `null` budget means unlimited — returns immediately without decrementing.
+   */
+  private consumePtcBudget(functionName: string): void {
+    if (this.ptcCallsRemaining === null) {
+      return;
+    }
+
+    if (this.ptcCallsRemaining > 0) {
+      this.ptcCallsRemaining--;
+      return;
+    }
+
+    const limit = this.maxPtcCalls ?? 0;
+    throw new PTCCallBudgetExceededError({
+      limit,
+      attempted: limit + 1,
+      functionName,
+    });
+  }
+
+  /**
    * Get or create a session for the given id.
    *
    * Sessions are deduped by id — calling `getOrCreate` twice with the
@@ -395,70 +433,75 @@ export class ReplSession {
 
     this.logs.length = 0;
 
-    if (timeoutMs >= 0) {
-      runtime.setInterruptHandler(
-        shouldInterruptAfterDeadline(Date.now() + timeoutMs),
-      );
-    } else {
-      runtime.setInterruptHandler(() => false);
-    }
+    this.resetPtcBudget();
+    try {
+      if (timeoutMs >= 0) {
+        runtime.setInterruptHandler(
+          shouldInterruptAfterDeadline(Date.now() + timeoutMs),
+        );
+      } else {
+        runtime.setInterruptHandler(() => false);
+      }
 
-    const transformed = transformForEval(code);
-    const result = await context.evalCodeAsync(transformed);
+      const transformed = transformForEval(code);
+      const result = await context.evalCodeAsync(transformed);
 
-    if (result.error) {
-      const error = context.dump(result.error);
-      result.error.dispose();
-      return { ok: false, error, logs: [...this.logs] };
-    }
+      if (result.error) {
+        const error = context.dump(result.error);
+        result.error.dispose();
+        return { ok: false, error, logs: [...this.logs] };
+      }
 
-    const promiseState = context.getPromiseState(result.value);
+      const promiseState = context.getPromiseState(result.value);
 
-    if (promiseState.type === "fulfilled") {
-      if (promiseState.notAPromise) {
-        const value = context.dump(result.value);
+      if (promiseState.type === "fulfilled") {
+        if (promiseState.notAPromise) {
+          const value = context.dump(result.value);
+          result.value.dispose();
+          return { ok: true, value, logs: [...this.logs] };
+        }
+        const value = context.dump(promiseState.value);
+        promiseState.value.dispose();
         result.value.dispose();
         return { ok: true, value, logs: [...this.logs] };
       }
-      const value = context.dump(promiseState.value);
-      promiseState.value.dispose();
-      result.value.dispose();
-      return { ok: true, value, logs: [...this.logs] };
-    }
 
-    if (promiseState.type === "rejected") {
-      const error = context.dump(promiseState.error);
-      promiseState.error.dispose();
-      result.value.dispose();
-      return { ok: false, error, logs: [...this.logs] };
-    }
-
-    const noTimeout = timeoutMs < 0;
-    const deadline = noTimeout ? Infinity : Date.now() + timeoutMs;
-    while (noTimeout || Date.now() < deadline) {
-      context.runtime.executePendingJobs();
-      const state = context.getPromiseState(result.value);
-      if (state.type === "fulfilled") {
-        const value = context.dump(state.value);
-        state.value.dispose();
-        result.value.dispose();
-        return { ok: true, value, logs: [...this.logs] };
-      }
-      if (state.type === "rejected") {
-        const error = context.dump(state.error);
-        state.error.dispose();
+      if (promiseState.type === "rejected") {
+        const error = context.dump(promiseState.error);
+        promiseState.error.dispose();
         result.value.dispose();
         return { ok: false, error, logs: [...this.logs] };
       }
-      await new Promise((r) => setTimeout(r, 1));
-    }
 
-    result.value.dispose();
-    return {
-      ok: false,
-      error: { message: "Promise timed out — execution interrupted" },
-      logs: [...this.logs],
-    };
+      const noTimeout = timeoutMs < 0;
+      const deadline = noTimeout ? Infinity : Date.now() + timeoutMs;
+      while (noTimeout || Date.now() < deadline) {
+        context.runtime.executePendingJobs();
+        const state = context.getPromiseState(result.value);
+        if (state.type === "fulfilled") {
+          const value = context.dump(state.value);
+          state.value.dispose();
+          result.value.dispose();
+          return { ok: true, value, logs: [...this.logs] };
+        }
+        if (state.type === "rejected") {
+          const error = context.dump(state.error);
+          state.error.dispose();
+          result.value.dispose();
+          return { ok: false, error, logs: [...this.logs] };
+        }
+        await new Promise((r) => setTimeout(r, 1));
+      }
+
+      result.value.dispose();
+      return {
+        ok: false,
+        error: { message: "Promise timed out — execution interrupted" },
+        logs: [...this.logs],
+      };
+    } finally {
+      this.ptcCallsRemaining = null;
+    }
   }
 
   dispose(): void {
@@ -539,6 +582,7 @@ export class ReplSession {
           const promise = context.newPromise();
           (async () => {
             try {
+              this.consumePtcBudget(camelName);
               const rawInput =
                 typeof input === "object" && input !== null ? input : {};
               const result = await t.invoke(rawInput);

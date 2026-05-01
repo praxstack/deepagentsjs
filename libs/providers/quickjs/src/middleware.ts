@@ -249,6 +249,7 @@ export function createQuickJSMiddleware(
         If file or other tools are available, call them via the tools namespace: await tools.readFile({ path }).
         If skills are configured, dynamically import them: await import("@/skills/<name>").
       `,
+      metadata: { ls_code_input_language: "javascript" },
       schema: z.object({
         code: z
           .string()

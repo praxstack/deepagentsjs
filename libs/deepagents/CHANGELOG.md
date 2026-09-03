@@ -1,5 +1,13 @@
 # deepagents
 
+## 1.13.3
+
+### Patch Changes
+
+- [#797](https://github.com/langchain-ai/deepagentsjs/pull/797) [`b393223`](https://github.com/langchain-ai/deepagentsjs/commit/b393223f6f6f37716979ee23ed561338f7ea63fc) Thanks [@thushanth-bengre-langchain](https://github.com/thushanth-bengre-langchain)! - Enforce harness-profile tool exclusions inside declarative subagents using each subagent model's profile.
+
+- [#800](https://github.com/langchain-ai/deepagentsjs/pull/800) [`2cce30d`](https://github.com/langchain-ai/deepagentsjs/commit/2cce30d269f25d3b8836bdce73ea84c08f8e4fbb) Thanks [@thushanth-bengre-langchain](https://github.com/thushanth-bengre-langchain)! - Add experimental conversation forking for subagents (`mode: "fork"`), inheriting the parent's message history and system prompt for prompt-cache reuse.
+
 ## 1.13.2
 
 ### Patch Changes

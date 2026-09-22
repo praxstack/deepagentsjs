@@ -1,5 +1,11 @@
 # deepagents
 
+## 1.14.1
+
+### Patch Changes
+
+- [#866](https://github.com/langchain-ai/deepagentsjs/pull/866) [`00dd5ec`](https://github.com/langchain-ai/deepagentsjs/commit/00dd5ec64f4a2c3571fc1b724cb6d052740b3dba) Thanks [@thushanth-bengre-langchain](https://github.com/thushanth-bengre-langchain)! - fix(filesystem): reject symlinks in virtual-mode paths that resolve outside the sandbox root
+
 ## 1.14.0
 
 ### Minor Changes
